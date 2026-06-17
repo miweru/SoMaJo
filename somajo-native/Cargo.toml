@@ -1,0 +1,13 @@
+[package]
+name = "somajo_native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "somajo_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+unicode-segmentation = "1.12"
+icu_properties = { version = "1.5", features = ["compiled_data"] }
