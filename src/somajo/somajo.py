@@ -42,6 +42,10 @@ class SoMaJo:
     _default_language = "de_CMC"
     paragraph_separators = {"empty_lines", "single_newlines"}
     _default_parsep = "empty_lines"
+    # Below this many input chunks, spawning a multiprocessing.Pool (worker
+    # startup + per-worker regex recompilation) costs more than it saves, so we
+    # fall back to the serial path even when ``parallel > 1``. Tunable.
+    _parallel_min_paragraphs = 1000
 
     def __init__(self, language, *, split_camel_case=False, split_sentences=True, xml_sentences=None, character_offsets=False):
         assert language in self.supported_languages
@@ -72,23 +76,25 @@ class SoMaJo:
         parallelization.
 
         """
-        def partok():
+        func = functools.partial(self._tokenize, xml_input=xml_input)
+
+        def partok(items):
             with multiprocessing.Pool(min(parallel, multiprocessing.cpu_count())) as pool:
-                tokens = pool.imap(
-                    functools.partial(self._tokenize, xml_input=xml_input),
-                    token_info,
-                    250
-                )
-                for par in tokens:
+                for par in pool.imap(func, items, 250):
                     yield par
 
         if parallel > 1:
-            tokens = partok()
+            # Peek at the first chunks: if the input is small, the Pool's
+            # startup cost dominates, so run serially instead. Output is
+            # identical either way (chunk-level parallelism is deterministic
+            # and order-preserving).
+            head = list(itertools.islice(token_info, self._parallel_min_paragraphs))
+            if len(head) < self._parallel_min_paragraphs:
+                tokens = map(func, head)
+            else:
+                tokens = partok(itertools.chain(head, token_info))
         else:
-            tokens = map(
-                functools.partial(self._tokenize, xml_input=xml_input),
-                token_info
-            )
+            tokens = map(func, token_info)
         if self.split_sentences:
             tokens = itertools.chain.from_iterable(tokens)
             tokens = self._sentence_splitter._merge_empty_sentences(tokens)
