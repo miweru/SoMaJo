@@ -8,6 +8,9 @@
 /.venv/
 /.idea/
 /benchmarks/golden/
+/build/
+/src/build/
+*.so
 __pycache__/
 *~
 *.pyc

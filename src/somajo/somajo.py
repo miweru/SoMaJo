@@ -14,6 +14,26 @@ from .token import Token
 from .tokenizer import Tokenizer
 
 
+# Each worker process builds its own SoMaJo once (via the Pool initializer)
+# instead of receiving a pickled instance per task. This avoids shipping the
+# Tokenizer's compiled regexes across the process boundary on every chunk — and
+# is required once the Tokenizer is a compiled (mypyc) native class, which does
+# not round-trip through pickle. Only the Token objects in the input chunks and
+# the result lists cross the boundary (Token stays pure Python and picklable).
+_worker_somajo = None
+_worker_xml_input = False
+
+
+def _init_worker(config, xml_input):
+    global _worker_somajo, _worker_xml_input
+    _worker_somajo = SoMaJo(**config)
+    _worker_xml_input = xml_input
+
+
+def _worker_tokenize(token_info_item):
+    return _worker_somajo._tokenize(token_info_item, _worker_xml_input)
+
+
 class SoMaJo:
     """Tokenization and sentence splitting.
 
@@ -79,8 +99,18 @@ class SoMaJo:
         func = functools.partial(self._tokenize, xml_input=xml_input)
 
         def partok(items):
-            with multiprocessing.Pool(min(parallel, multiprocessing.cpu_count())) as pool:
-                for par in pool.imap(func, items, 250):
+            config = {
+                "language": self.language,
+                "split_camel_case": self.split_camel_case,
+                "split_sentences": self.split_sentences,
+                "xml_sentences": self.xml_sentences,
+                "character_offsets": self.character_offsets,
+            }
+            with multiprocessing.Pool(
+                    min(parallel, multiprocessing.cpu_count()),
+                    initializer=_init_worker,
+                    initargs=(config, xml_input)) as pool:
+                for par in pool.imap(_worker_tokenize, items, 250):
                     yield par
 
         if parallel > 1:

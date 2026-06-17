@@ -96,7 +96,7 @@ class Token:
         return self.text
 
     @property
-    def extra_info(self):
+    def extra_info(self) -> str:
         """String representation of extra information.
 
         Returns
