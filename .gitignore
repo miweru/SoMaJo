@@ -5,6 +5,9 @@
 /doc/build/doctrees/
 /src/SoMaJo.egg-info/
 /venv/
+/.venv/
+/.idea/
+/benchmarks/golden/
 __pycache__/
 *~
 *.pyc
