@@ -251,6 +251,17 @@ class Tokenizer():
         # self.unicode_symbols = re.compile(r"[\u2600-\u27BF\uFE0E\uFE0F\U0001F300-\U0001f64f\U0001F680-\U0001F6FF\U0001F900-\U0001F9FF]")
         self.symbols_and_dingbats = re.compile(r"[\u2600-\u27BF]")
         self.unicode_flags = re.compile(r"\p{Regional_Indicator}{2}\uFE0F?")
+        # Precompiled patterns for _split_emojis (the #1 hotspot). The grapheme
+        # scan and per-grapheme property tests run over every token, so leaving
+        # them as uncompiled module-level calls paid the regex-module flag
+        # dispatch overhead on every call.
+        self._grapheme = re.compile(r"\X")
+        # `_emoji_trigger` is the UNION of the two per-grapheme classes below
+        # (incl. U+FE0F): if not even one such codepoint is present in a token,
+        # no grapheme can match and the whole scan is skippable without any
+        # change to the output. It doubles as the presence gate.
+        self._emoji_trigger = re.compile(r"[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F]")
+        self._emoji_single = re.compile(r"[\p{Extended_Pictographic}\p{Emoji_Presentation}]")
 
         # special tokens containing + or &
         tokens_with_plus_or_ampersand = utils.read_abbreviation_file("tokens_with_plus_or_ampersand.txt")
@@ -446,6 +457,41 @@ class Tokenizer():
         self.dot = re.compile(r'(\.)')
         # Soft hyphen ­ „“
 
+        # Cache of sorted named-group numbers per regex, filled lazily in
+        # _split_matches so the sort runs once per pattern, not once per call.
+        self._group_numbers = {}
+        # Cheap per-pass prefilter: each listed rule cannot produce a match
+        # unless at least one of its trigger substrings is present in the token.
+        # Skipping finditer when none is present removes per-pass Python
+        # overhead without changing the output. ONLY case-neutral
+        # symbols/digits are used as triggers, so the case-insensitive rules
+        # remain safe. Each trigger is a proven *necessary* condition for the
+        # pattern (verified against the regex source, gated by the differential
+        # harness).
+        self._guards = {
+            self.mention: ("@",),                 # [@]\w+
+            self.entity: ("&",),                  # &…;
+            self.action_word: ("*",),             # [*+]…[*]  (closing * always present)
+            self.underline: ("_",),               # _…_
+            self.de_slash: ("/",),                # /+
+            self.reddit_links: ("/",),            # …(?:/\w+)+…
+            self.markdown_links: ("](",),         # ]( appear adjacent in the pattern
+            self.heart_emoticon: ("3",),          # [<^]3
+            self.hashtag_sequence: ("#",),        # (?:[#]\w…)+
+            self.single_hashtag: ("#",),          # [#]\w…
+            # Abbreviations: every pattern — and every lexicon entry (de+en,
+            # verified) — requires a literal dot.
+            self.single_letter_ellipsis: (".",),
+            self.and_cetera: (".",),
+            self.str_abbreviations: (".",),
+            self.nr_abbreviations: (".",),
+            self.single_token_abbreviation: (".",),
+            self.single_letter_abbreviation: (".",),
+            self.ps: (".",),
+            self.artikel: (".",),                 # \bArt.
+            self.roman_ordinal: (".",),           # …\.  (Roman numerals, no digit)
+        }
+
     def _split_on_boundaries(self, node, boundaries, token_class, *, lock_match=True, delete_whitespace=False):
         """"""
         n = len(boundaries)
@@ -502,29 +548,44 @@ class Tokenizer():
         token_dll.remove(node)
 
     def _split_matches(self, regex, node, token_class="regular", repl=None, split_named_subgroups=True, delete_whitespace=False):
+        text = node.value.text
+        guard = self._guards.get(regex)
+        if guard is not None and not any(s in text for s in guard):
+            return
         boundaries = []
-        split_groups = split_named_subgroups and len(regex.groupindex) > 0
-        group_numbers = sorted(regex.groupindex.values())
-        for m in regex.finditer(node.value.text):
-            if split_groups:
+        if split_named_subgroups and regex.groupindex:
+            group_numbers = self._group_numbers.get(regex)
+            if group_numbers is None:
+                group_numbers = sorted(regex.groupindex.values())
+                self._group_numbers[regex] = group_numbers
+            for m in regex.finditer(text):
                 for g in group_numbers:
                     if m.span(g) != (-1, -1):
                         boundaries.append((m.start(g), m.end(g), None))
-            else:
-                if repl is None:
-                    boundaries.append((m.start(), m.end(), None))
-                else:
-                    boundaries.append((m.start(), m.end(), m.expand(repl)))
+        elif repl is None:
+            for m in regex.finditer(text):
+                boundaries.append((m.start(), m.end(), None))
+        else:
+            for m in regex.finditer(text):
+                boundaries.append((m.start(), m.end(), m.expand(repl)))
         self._split_on_boundaries(node, boundaries, token_class, delete_whitespace=delete_whitespace)
 
     def _split_emojis(self, node, token_class="emoticon"):
+        text = node.value.text
+        # Fast path: every emoji-relevant codepoint is > U+007F and lies in the
+        # Extended_Pictographic / Emoji_Presentation / U+FE0F set. If the token
+        # has none, the grapheme scan below can yield no boundary, so skip it.
+        # `isascii()` is a cheap C-level reject for the overwhelmingly common
+        # ASCII case; the presence test handles non-ASCII (e.g. umlauts) tokens.
+        if text.isascii() or self._emoji_trigger.search(text) is None:
+            return
         boundaries = []
-        for m in re.finditer(r"\X", node.value.text):
+        for m in self._grapheme.finditer(text):
             if m.end() - m.start() > 1:
-                if re.search(r"[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F]", m.group()):
+                if self._emoji_trigger.search(m.group()):
                     boundaries.append((m.start(), m.end(), None))
             else:
-                if re.search(r"[\p{Extended_Pictographic}\p{Emoji_Presentation}]", m.group()):
+                if self._emoji_single.search(m.group()):
                     boundaries.append((m.start(), m.end(), None))
         self._split_on_boundaries(node, boundaries, token_class)
 
@@ -558,11 +619,15 @@ class Tokenizer():
         the matches for regex1 into tokens.
 
         """
+        guard = self._guards.get(regex1)
         for t in token_dll:
             if t.value.markup or t.value._locked:
                 continue
+            text = t.value.text
+            if guard is not None and not any(s in text for s in guard):
+                continue
             boundaries = []
-            for m1 in regex1.finditer(t.value.text):
+            for m1 in regex1.finditer(text):
                 for m2 in regex2.finditer(m1.group(0)):
                     boundaries.append((m2.start() + m1.start(), m2.end() + m1.start(), None))
             self._split_on_boundaries(t, boundaries, token_class, delete_whitespace=delete_whitespace)
@@ -607,6 +672,10 @@ class Tokenizer():
 
         for t in token_dll:
             if t.value.markup or t.value._locked:
+                continue
+            # Every alternative of self.abbreviation requires a literal dot
+            # (either `(\p{L}\.){2,}` or a dotted lexicon entry).
+            if "." not in t.value.text:
                 continue
             boundaries = []
             for m in self.abbreviation.finditer(t.value.text):
