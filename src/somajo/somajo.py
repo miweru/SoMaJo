@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
+import concurrent.futures
 import functools
 import itertools
 import multiprocessing
+import sys
 
 from . import (
     alignment,
@@ -32,6 +34,12 @@ def _init_worker(config, xml_input):
 
 def _worker_tokenize(token_info_item):
     return _worker_somajo._tokenize(token_info_item, _worker_xml_input)
+
+
+def _gil_enabled():
+    """True on regular CPython, False on a free-threaded build with the GIL off."""
+    check = getattr(sys, "_is_gil_enabled", None)
+    return check() if check is not None else True
 
 
 class SoMaJo:
@@ -97,6 +105,7 @@ class SoMaJo:
 
         """
         func = functools.partial(self._tokenize, xml_input=xml_input)
+        n_workers = min(parallel, multiprocessing.cpu_count())
 
         def partok(items):
             config = {
@@ -107,22 +116,41 @@ class SoMaJo:
                 "character_offsets": self.character_offsets,
             }
             with multiprocessing.Pool(
-                    min(parallel, multiprocessing.cpu_count()),
+                    n_workers,
                     initializer=_init_worker,
                     initargs=(config, xml_input)) as pool:
                 for par in pool.imap(_worker_tokenize, items, 250):
                     yield par
 
+        def threadtok(items):
+            # On a free-threaded build the GIL no longer serializes pure-Python
+            # work, so threads give real multi-core speedup with a SHARED
+            # Tokenizer — no pickling, no per-worker regex recompile, no process
+            # spawn. _tokenize works on per-call local state; the only shared
+            # mutable is the Tokenizer's lazily-filled group-number cache, whose
+            # writes are idempotent (same pattern -> same value).
+            #
+            # Items are handed out in batches (like the process pool's
+            # chunksize) so the work-queue lock is taken ~once per batch rather
+            # than once per paragraph, which is what lets thread scaling hold up.
+            item_iter = iter(items)
+            batches = iter(lambda: list(itertools.islice(item_iter, 250)), [])
+            with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
+                for batch_result in ex.map(lambda b: [func(i) for i in b], batches):
+                    yield from batch_result
+
         if parallel > 1:
-            # Peek at the first chunks: if the input is small, the Pool's
+            # Peek at the first chunks: if the input is small, the pool's
             # startup cost dominates, so run serially instead. Output is
             # identical either way (chunk-level parallelism is deterministic
             # and order-preserving).
             head = list(itertools.islice(token_info, self._parallel_min_paragraphs))
             if len(head) < self._parallel_min_paragraphs:
                 tokens = map(func, head)
-            else:
+            elif _gil_enabled():
                 tokens = partok(itertools.chain(head, token_info))
+            else:
+                tokens = threadtok(itertools.chain(head, token_info))
         else:
             tokens = map(func, token_info)
         if self.split_sentences:
