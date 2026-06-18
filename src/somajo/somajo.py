@@ -91,6 +91,8 @@ class SoMaJo:
             from .fast_tokenizer import FastTokenizer
             self._fast_tokenizer = FastTokenizer(language=language, split_camel_case=split_camel_case)
         else:
+            from ._compiled import warn_if_interpreted
+            warn_if_interpreted()
             self._tokenizer = Tokenizer(split_camel_case=self.split_camel_case, language=self.language)
         if self.split_sentences:
             self._sentence_splitter = SentenceSplitter(language=self.language)
