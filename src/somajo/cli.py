@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import sys
 import time
 
 from . import (
@@ -28,6 +29,7 @@ def arguments():
     parser.add_argument("-e", "--extra_info", action="store_true", help='Output additional information for each token: SpaceAfter=No if the token was not followed by a space and OriginalSpelling="…" if the token contained whitespace.')
     parser.add_argument("--character-offsets", action="store_true", help='Output character offsets in the input for each token.')
     parser.add_argument("--parallel", type=int, default=1, metavar="N", help="Run N worker processes (up to the number of CPUs) to speed up tokenization.")
+    parser.add_argument("--fast", action="store_true", help="Use the single-pass fast tokenizer (~7x faster, ~99.7%% of the exact token F1 on EmpiriST). Near-gold accuracy for throughput-bound work; not byte-identical to the default. Incompatible with --xml and --character-offsets.")
     parser.add_argument("-v", "--version", action="version", version="SoMaJo %s" % __version__, help="Output version information and exit.")
     parser.add_argument("FILE", type=argparse.FileType("r", encoding="utf-8"), help="The input file (UTF-8-encoded) or \"-\" to read from STDIN.")
     args = parser.parse_args()
@@ -44,12 +46,17 @@ def main():
         is_xml = True
     if args.sentence_tag:
         args.split_sentences = True
+    if args.fast and is_xml:
+        sys.exit("error: --fast is incompatible with XML input (-x/--xml/--tag/--prune/--strip-tags).")
+    if args.fast and args.character_offsets:
+        sys.exit("error: --fast is incompatible with --character-offsets.")
     tokenizer = SoMaJo(
         args.language,
         split_camel_case=args.split_camel_case,
         split_sentences=args.split_sentences,
         xml_sentences=args.sentence_tag,
-        character_offsets=args.character_offsets
+        character_offsets=args.character_offsets,
+        fast=args.fast
     )
     if is_xml:
         eos_tags = args.tag
