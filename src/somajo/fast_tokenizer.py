@@ -9,11 +9,12 @@ words. A small post-pass re-joins lexicon abbreviations, splits multipart ones
 (``z.B.`` → ``z.`` ``B.``) and applies camelCase splitting with SoMaJo's
 exception lexicon.
 
-It is roughly an order of magnitude faster than the exact tokenizer but is NOT
-byte-identical: on the EmpiriST 2015 gold standard it scores ~99.5–99.8 % token
-F1 vs ~99.6–99.9 % for the exact tokenizer (within ~0.1 pp). Use it for
-throughput-bound work over large corpora where near-gold accuracy is enough;
-use the default exact tokenizer when every token must match.
+It is roughly 7–8× faster than the exact tokenizer on a single core but is NOT
+byte-identical: on the EmpiriST 2015 gold standard it scores ~99.5–99.9 % token
+F1 vs ~99.6–99.9 % for the exact tokenizer (within ~0.01 pp after the url/
+emoticon boundary fixes). Use it for throughput-bound work over large corpora
+where near-gold accuracy is enough; use the default exact tokenizer when every
+token must match.
 
 Tuned and measured for German (``de_CMC``); ``en_PTB`` runs but is less tuned.
 Does not support ``character_offsets`` or the XML pipeline.
@@ -65,8 +66,15 @@ _PARTS = [
     r"(?P<xmltag><(?:/?[\p{L}_!?][^<>]*)>)",
     r"(?P<arrow>-+>|<-+|[←→↑↓])",
     r"(?P<url>(?:(?:https?|ftp|svn)://|(?:https?://)?www\.)[^\s<>]+[^\s<>.,;:!?)\"'])",
-    r"(?P<url2>(?<![\w.])[\w./-]+\.(?i:de|com|org|net|edu|gov|info|eu|at|ch|tv|me|io)(?:/[^\s]*)?)",
-    r"(?P<email>[\w.%+-]+@[\w.-]+\.\p{L}{2,})",
+    # length-bounded prefixes ({1,128}) keep this linear — an unbounded [\w./-]+
+    # (which overlaps the trailing \. and /-path) backtracks quadratically on
+    # long dotted/slashed junk tokens (a ReDoS vector on the noisy web input the
+    # fast mode targets). 128 > the longest real URL/token, so output is
+    # unchanged on realistic input. The TLD set also accepts common file
+    # extensions so paths like "Icons/security-medium.png" stay one URL token
+    # (matching the exact tokenizer's url_without_protocol).
+    r"(?P<url2>(?<![\w.])[\w./-]{1,128}\.(?i:de|com|org|net|edu|gov|info|eu|at|ch|tv|me|io|us|cc|ly|be|live|jpg|png|gif|log|txt|xlsx?|docx?|pptx?|pdf)(?:-\w+)?(?:/[^\s]*)?)",
+    r"(?P<email>[\w.%+-]{1,128}@[\w.-]{1,128}\.\p{L}{2,})",
     r"(?P<mention>[@]\w+)",
     r"(?P<hashtag>(?<!\w)[#]\w(?:[\w-]*\w)?)",
     _EMOTICON_PART,
@@ -84,6 +92,32 @@ _PARTS = [
 ]
 _PATTERN = regex.compile("|".join(_PARTS))
 _XMLTAG = regex.compile(r"<(?:/?[\p{L}_!?][^<>]*)>")
+
+# spaced-emoticon re-join (mirrors the exact tokenizer's space_emoticon rule:
+# `([:;]) [()] (?![ ]?(?:00|[+])\d)`). line.split() separates ": )" into ":" and
+# ")"; this rejoins them so they tokenize as one emoticon.
+_EYES = frozenset((":", ";"))
+_MOUTHS = frozenset(("(", ")"))
+_PHONE_AFTER = regex.compile(r"(?:00|[+])\d")
+
+
+def _merge_space_emoticons(words):
+    """Re-join a lone ':'/';' eye + lone ')'/'(' mouth into one emoticon token
+    (": )" -> ":)"), unless the mouth is followed by a phone number (": ) 0049",
+    ": ) +49") — exactly the exclusion the exact space_emoticon rule makes."""
+    out = []
+    n = len(words)
+    i = 0
+    while i < n:
+        w = words[i]
+        if (w in _EYES and i + 1 < n and words[i + 1] in _MOUTHS
+                and not (i + 2 < n and _PHONE_AFTER.match(words[i + 2]))):
+            out.append(w + words[i + 1])
+            i += 2
+        else:
+            out.append(w)
+            i += 1
+    return out
 
 # scanner group name -> SoMaJo token class
 _TYPE2CLASS = {
@@ -155,7 +189,10 @@ class FastTokenizer:
                              markup_class="end" if line.startswith("</") else "start",
                              markup_eos=False, locked=True))
                 continue
-            for w in line.split():
+            words = line.split()
+            if (": " in line or "; " in line) and (")" in line or "(" in line):
+                words = _merge_space_emoticons(words)
+            for w in words:
                 if w.isalpha():
                     # alpha fast path: an all-lowercase word (or scc off) is never
                     # camelCase-split, so emit it directly without _word/_camel_split

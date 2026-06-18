@@ -84,8 +84,8 @@ class SoMaJo:
         self.character_offsets = character_offsets
         self.fast = fast
         if fast:
-            # Opt-in single-pass tokenizer: ~10x faster, ~99.5-99.8% F1 vs the
-            # exact tokenizer's ~99.6-99.9% on EmpiriST (within ~0.1 pp). It is
+            # Opt-in single-pass tokenizer: ~7-8x faster, ~99.5-99.9% F1 vs the
+            # exact tokenizer's ~99.6-99.9% on EmpiriST (within ~0.01 pp). It is
             # NOT byte-identical and does not support character offsets or XML.
             assert not character_offsets, "fast=True does not support character_offsets"
             from .fast_tokenizer import FastTokenizer

@@ -86,9 +86,10 @@ somajo-tokenizer --split_sentences <file> | somewe-tagger --tag <model> -
   - Parallelization: Optionally run multiple worker processes to speed
     up tokenization
   - Optional single-pass [fast mode](#fast-mode) (`fast=True` /
-    `--fast`): ~7× faster on a single core at ~99.7 % of the exact
-    token F1 on the EmpiriST gold standard — near-gold accuracy for
-    throughput-bound work over large corpora
+    `--fast`): ~7–8× faster on a single core at ~99.7 % token F1 on
+    the EmpiriST gold standard (within ~0.01 pp of the exact
+    tokenizer) — near-gold accuracy for throughput-bound work over
+    large corpora
 
 
 ## Installation
@@ -430,14 +431,14 @@ passes. It is a full drop-in — it produces the same `Token` objects
 sentence splitting), works with `--parallel`, and supports both German
 (`de_CMC`, well tuned) and English (`en_PTB`, less tuned).
 
-On a single core it is roughly **7× faster** end-to-end while reaching
-about **99.7 % of the exact token F₁** on the EmpiriST gold standard
-(within ~0.1 pp):
+On a single core it is roughly **7–8× faster** end-to-end while reaching
+**~99.7 % token F₁** on the EmpiriST gold standard — within ~0.01 pp of
+the exact tokenizer (and on the web subset it actually edges ahead):
 
 | Corpus | exact F₁ | fast F₁ |
 |--------|----------|---------|
-| CMC    | 99.59    | 99.50   |
-| Web    | 99.91    | 99.84   |
+| CMC    | 99.59    | 99.56   |
+| Web    | 99.91    | 99.92   |
 
 (Both columns are measured the same way — token-boundary F₁ via the
 bundled `benchmarks/accuracy.py` harness — so they are directly
