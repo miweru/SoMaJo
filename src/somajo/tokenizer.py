@@ -519,6 +519,16 @@ class Tokenizer():
             self.artikel: (".",),                 # \bArt.
             self.roman_ordinal: (".",),           # …\.  (Roman numerals, no digit)
             self.gender_marker: ("*", ":", "/"),  # \p{L}+[*:/]in…
+            # audit pass — more rare-anchor gates, each a verified necessary
+            # condition of every match (byte-identical, differential-gated).
+            self.amount: (",-", ".-"),                # \d…[,.]-
+            self.letter_apostrophe_word: ("'", "’"),  # \b[dlo]['’]\p{L}+
+            self.double_latex_quote: ("`", "'"),      # `` or ''
+            self.paired_single_latex_quote: ("`",),   # `…'  (backtick mandatory)
+            self.paired_single_quot_mark: ("'",),     # '…'  (ASCII apostrophe)
+            self.letter_sharp: ("#",),                # \b[acdfg]#
+            self.emoji: ("emojiQ",),                  # \bemojiQ\p{L}{3,} (case-sensitive)
+            self.space_emoticon: (": (", ": )", "; (", "; )"),  # [:;] [()]
         }
         # Case-insensitive variant: the trigger must be present in text.lower().
         # For rules anchored on a case-insensitive literal (which the
@@ -528,6 +538,11 @@ class Tokenizer():
             self.nr_abbreviations: ("nr.",),                    # \w+\.-?Nr\.
             self.single_token_abbreviation: self._single_token_abbrev_lower,
             self.single_tokens: self._single_tokens_lower,
+            self.doi: ("doi:10.",),                # \bdoi:10\.…
+            self.doi_with_space: ("doi: ",),       # (?<=\bdoi: )…
+            self.xml_declaration: ("<?xml",),      # <\?xml…\?>
+            self.simple_url: ("://", "www."),      # scheme:// or www.
+            self.simple_url_with_brackets: ("://", "www."),
         }
         # Regex variant: a necessary sub-pattern, cheaper to scan than the full
         # rule, that must match for the rule to match at all.
@@ -537,6 +552,10 @@ class Tokenizer():
             # arrow needs '>' or '<' or a Unicode arrow
             self.arrow: re.compile(r"[<>←-⇿]"),
         }
+        # isascii reject: these rules' character classes are entirely > U+007F
+        # (symbols/dingbats U+2600–27BF; Regional_Indicator flag letters), so a
+        # pure-ASCII token can never match — skip via a cheap C-level isascii().
+        self._guards_isascii = frozenset((self.symbols_and_dingbats, self.unicode_flags))
 
     def _split_on_boundaries(self, node, boundaries, token_class, *, lock_match=True, delete_whitespace=False):
         """"""
@@ -605,6 +624,8 @@ class Tokenizer():
                 return
         guard_re = self._guards_re.get(regex)
         if guard_re is not None and guard_re.search(text) is None:
+            return
+        if regex in self._guards_isascii and text.isascii():
             return
         boundaries = []
         if split_named_subgroups and regex.groupindex:
