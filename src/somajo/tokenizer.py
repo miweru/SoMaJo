@@ -308,13 +308,22 @@ class Tokenizer():
         # self.simple_abbreviations = set([a[0].lower() for a in abbrev_simple if a[1]])
         # self.simple_abbreviation_candidates = re.compile(r"(?<![\w.])\p{L}{2,}\.(?!\p{L}{1,3}\.)")
         # abbreviation_list = [a[0] for a in abbrev_simple if not a[1]]
-        self.abbreviation = re.compile(r"(?<![\p{L}.])(?:" +
-                                       r"(?:(?:\p{L}\.){2,})" +
-                                       r"|" +
-                                       # r"(?i:" +    # this part should be case insensitive
-                                       r'|'.join([re.escape(_) for _ in abbreviation_list]) +
-                                       # r"))+(?!\p{L}{1,3}\.)", re.V1)
-                                       r")+(?!\p{L}{1,3}\.)", re.IGNORECASE)
+        _abbrev_pattern = (r"(?<![\p{L}.])(?:" +
+                           r"(?:(?:\p{L}\.){2,})" +
+                           r"|" +
+                           r'|'.join([re.escape(_) for _ in abbreviation_list]) +
+                           r")+(?!\p{L}{1,3}\.)")
+        self.abbreviation = re.compile(_abbrev_pattern, re.IGNORECASE)
+        # Same pattern WITHOUT IGNORECASE, for matching against text.lower()
+        # (the lexicon is already lowercased). Used only on chunks where
+        # lowercasing is length-preserving, so match spans map 1:1 back to the
+        # original text. This swaps the engine's Unicode case-folding for
+        # str.lower(); the two agree for German and any text with simple,
+        # length-preserving lowercasing. Approved relaxation: output can differ
+        # from strict IGNORECASE only on exotic non-German case-folding (e.g.
+        # Greek final sigma) occurring inside an abbreviation — which does not
+        # happen in real German CMC text, so the differential stays green.
+        self._abbreviation_lower = re.compile(_abbrev_pattern)
         # Fast gate for the self.abbreviation pass. That 1000+-literal
         # alternation is the single most expensive rule in the cascade (~25% of
         # runtime), yet it matches nothing on most chunks. The gate skips it
@@ -749,10 +758,19 @@ class Tokenizer():
         for t in token_dll:
             if t.value.markup or t.value._locked:
                 continue
-            if not self._abbreviation_possible(t.value.text):
+            text = t.value.text
+            if not self._abbreviation_possible(text):
                 continue
+            # Match against lowercased text with the non-IGNORECASE pattern when
+            # that is length-preserving (so spans map 1:1); fall back to the
+            # case-insensitive engine otherwise. See _abbreviation_lower.
+            low = text.lower()
+            if len(low) == len(text):
+                matches = self._abbreviation_lower.finditer(low)
+            else:
+                matches = self.abbreviation.finditer(text)
             boundaries = []
-            for m in self.abbreviation.finditer(t.value.text):
+            for m in matches:
                 instance = m.group(0)
                 if split_multipart_abbrevs and self.multipart_abbreviation.fullmatch(instance):
                     start, end = m.span(0)
