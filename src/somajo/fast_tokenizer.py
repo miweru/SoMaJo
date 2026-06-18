@@ -142,26 +142,41 @@ class FastTokenizer:
 
     def tokenize(self, text):
         """Tokenize a paragraph (may contain newlines) into a list of Tokens."""
-        flat = []   # (text, type, space_after)
+        tokens = []
+        append = tokens.append
+        scc = self.split_camel_case
+        class2 = _TYPE2CLASS
         for line in text.split("\n"):
             line = line.strip()
             if not line:
                 continue
             if line[0] == "<" and line[-1] == ">" and _XMLTAG.fullmatch(line):
-                flat.append((line, "xmltag", True))
+                append(Token(line, markup=True,
+                             markup_class="end" if line.startswith("</") else "start",
+                             markup_eos=False, locked=True))
                 continue
             for w in line.split():
-                subs = self._word(w) if w.isalpha() else self._process(w)
+                if w.isalpha():
+                    # alpha fast path: an all-lowercase word (or scc off) is never
+                    # camelCase-split, so emit it directly without _word/_camel_split
+                    # (skips the slice alloc, method call, listcomp and the second
+                    # build pass for the ~98 % of alphabetic tokens that hit here).
+                    if not scc or w.islower():
+                        append(Token(w, token_class="regular", space_after=True))
+                        continue
+                    subs = self._word(w)
+                else:
+                    subs = self._process(w)
                 last = len(subs) - 1
                 for j, (t, ty) in enumerate(subs):
-                    flat.append((t, ty, j == last))
-        tokens = []
-        for t, ty, sa in flat:
-            if ty == "xmltag":
-                tokens.append(Token(t, markup=True,
-                                    markup_class="end" if t.startswith("</") else "start",
-                                    markup_eos=False, locked=True))
-            else:
-                tokens.append(Token(t, token_class=_TYPE2CLASS.get(ty, "regular"),
-                                    space_after=sa))
+                    if ty == "xmltag":
+                        # an XML tag glued to surrounding text (e.g. "x<b>y") is
+                        # emitted by _PATTERN's xmltag group -> a markup Token, just
+                        # like a tag alone on its own line.
+                        append(Token(t, markup=True,
+                                     markup_class="end" if t.startswith("</") else "start",
+                                     markup_eos=False, locked=True))
+                    else:
+                        append(Token(t, token_class=class2.get(ty, "regular"),
+                                     space_after=(j == last)))
         return tokens
