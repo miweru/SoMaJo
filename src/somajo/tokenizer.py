@@ -313,6 +313,19 @@ class Tokenizer():
                                        r'|'.join([re.escape(_) for _ in abbreviation_list]) +
                                        # r"))+(?!\p{L}{1,3}\.)", re.V1)
                                        r")+(?!\p{L}{1,3}\.)", re.IGNORECASE)
+        # Fast gate for the self.abbreviation pass. That 1000+-literal
+        # alternation is the single most expensive rule in the cascade (~25% of
+        # runtime), yet it matches nothing on most chunks. The gate skips it
+        # unless a match is *possible*, which it cannot be without either a
+        # structural `(\p{L}\.){2,}` run or a lexicon entry starting at a
+        # position not preceded by a letter or dot. Both are necessary
+        # conditions, so the gate never changes the output (verified by the
+        # differential harness and an exhaustive per-entry test).
+        self._abbrev_struct = re.compile(r"(?<![\p{L}.])(?:\p{L}\.){2,}", re.IGNORECASE)
+        self._abbrev_start = re.compile(r"(?<![\p{L}.])\p{L}")
+        self._abbrev_dotted = frozenset(a for a in abbreviation_list if a.endswith("."))
+        self._abbrev_nodot = tuple(a for a in abbreviation_list if not a.endswith("."))
+        self._abbrev_maxlen = max((len(a) for a in abbreviation_list), default=0)
         self.artikel = re.compile(r"\bArt.(?=\s?\d)", re.IGNORECASE)
 
         # MENTIONS, HASHTAGS, ACTION WORDS, UNDERLINE
@@ -479,6 +492,8 @@ class Tokenizer():
             self.heart_emoticon: ("3",),          # [<^]3
             self.hashtag_sequence: ("#",),        # (?:[#]\w…)+
             self.single_hashtag: ("#",),          # [#]\w…
+            # every lexicon entry contains a '+' or '&' (verified)
+            self.token_with_plus_ampersand: ("+", "&"),
             # Abbreviations: every pattern — and every lexicon entry (de+en,
             # verified) — requires a literal dot.
             self.single_letter_ellipsis: (".",),
@@ -660,6 +675,37 @@ class Tokenizer():
                 continue
             self._split_left(regex, t)
 
+    def _abbreviation_possible(self, text):
+        """Cheap, conservative necessary-condition test for self.abbreviation.
+
+        Returns False only when no abbreviation match is possible, so gating the
+        expensive alternation on it cannot change the output.
+        """
+        low = text.lower()
+        if "." not in low:
+            return False
+        # structural (\p{L}\.){2,} run
+        if self._abbrev_struct.search(text):
+            return True
+        # the few lexicon entries that do not end in a dot (substring is enough)
+        for w in self._abbrev_nodot:
+            if w in low:
+                return True
+        # dot-terminated lexicon entries: at every valid start, test each
+        # dot-terminated prefix (bounded by the longest entry) against the set
+        dotted = self._abbrev_dotted
+        maxlen = self._abbrev_maxlen
+        n = len(low)
+        for m in self._abbrev_start.finditer(low):
+            p = m.start()
+            seg = low[p:min(p + maxlen, n)]
+            i = seg.find(".")
+            while i != -1:
+                if seg[:i + 1] in dotted:
+                    return True
+                i = seg.find(".", i + 1)
+        return False
+
     def _split_abbreviations(self, token_dll, split_multipart_abbrevs=True):
         """Turn instances of abbreviations into tokens."""
         self._split_all_matches(self.single_letter_ellipsis, token_dll, "abbreviation")
@@ -673,9 +719,7 @@ class Tokenizer():
         for t in token_dll:
             if t.value.markup or t.value._locked:
                 continue
-            # Every alternative of self.abbreviation requires a literal dot
-            # (either `(\p{L}\.){2,}` or a dotted lexicon entry).
-            if "." not in t.value.text:
+            if not self._abbreviation_possible(t.value.text):
                 continue
             boundaries = []
             for m in self.abbreviation.finditer(t.value.text):
