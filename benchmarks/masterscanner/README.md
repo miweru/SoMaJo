@@ -13,13 +13,36 @@ Run: `PYTHONPATH=benchmarks/masterscanner:. python benchmarks/masterscanner/meas
 
 | | speed | F1 mean | F1 cmc | F1 web |
 |---|---|---|---|---|
-| **master-scanner** | **15.2 M chars/s** | **99.27%** | 99.00% | 99.54% |
+| **master-scanner (tuned for F1)** | **11.2 M chars/s** | **99.67%** | 99.50% | 99.84% |
+| master-scanner (tuned for speed) | 15.2 M chars/s | 99.27% | 99.00% | 99.54% |
 | SoMaJo (current build) | 0.89 M chars/s | 99.75% | 99.59% | 99.91% |
-| | **17.2x faster** | **−0.48%** | | |
 
-So: **~17x faster than the already-3.6x-optimised SoMaJo (≈61x over the
-original single-core), for ~0.5 percentage points of F1** — i.e. the token
-error rate roughly doubles (0.25% → 0.73%).
+So there is a tunable curve: **~12x faster for −0.08 pp F1**, or **~17x faster
+for −0.48 pp** (both ≈40–60x over the original single-core). The F1-tuned point
+is within **0.08 percentage points** of the EmpiriST-winning SoMaJo.
+
+### Closing the F1 gap (0.48 → 0.08 pp), keeping the speed
+
+A targeted error analysis against the gold standard (using evaluate.py's
+character-level diff — difflib on token lists is too noisy near real errors)
+drove these fixes, each measured:
+
+- **camelCase with the exception lexicon** (the biggest, ~0.14 pp): split
+  `IhreTeilnahme`→`Ihre Teilnahme`, but protect `WhatsApp`/`LaserJet` (SoMaJo's
+  camel_case_tokens.txt) AND `emojiQ…` (EmpiriST's textual-emoji encoding —
+  forgetting it crashed CMC precision to 93%). It had to run inside the
+  per-token path too, not just the alpha fast path (`derVgl.` → `der` `Vgl.`).
+- **emoticons**: a curated textface set (`*_*`, `>_<`, `._.`, `:!:`, …) — SoMaJo's
+  full pattern was ~1.4x slower for no extra F1 on this test set.
+- **compound-ellipsis hyphens** (`Kultur-`, `-ausrüstung`), **German decades**
+  (`1950er`, `1970er-Jahre`), **section numbers** (`1.1.`), **`/`-splitting**
+  (`2009/2010`), the **`´` apostrophe** (`It´s`).
+
+The residual ~0.08 pp is the genuinely hard tail SoMaJo tuned for years: space
+mentions (`@ marc`→`@marc`), handle-like domains (`tacheles.02spezial`),
+ambiguous alphanumerics (`Storrer2007` split vs `marc30` kept), obfuscated
+emails, redactions. Chasing them risks over-fitting the test set (a too-greedy
+`*word*` action-word rule, for instance, crashed CMC recall — reverted).
 
 ### How it got to 17x — two F1-preserving speed steps on top of the single pass
 
@@ -61,7 +84,8 @@ here; a second `.`-presence gate gave only ~1.02x and was dropped.)
 
 ## Verdict
 
-This is the first genuine 2x+ lever found, and it is real: ~17x for ~0.5% F1.
+This is the first genuine 2x+ lever found, and it is real: ~12x at 99.67% F1
+(within 0.08 pp of SoMaJo) or ~17x at 99.27%.
 But SoMaJo's entire value proposition is being the *most accurate* CMC tokenizer
 (EmpiriST winner), so silently trading 0.5% F1 for speed would undercut that.
 The responsible packaging is an **opt-in fast mode** (e.g. `SoMaJo(..., fast=True)`
