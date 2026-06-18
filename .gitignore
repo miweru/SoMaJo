@@ -15,3 +15,6 @@ __pycache__/
 *~
 *.pyc
 /somajo-native/target/
+/benchmarks/empirist_real_text.json
+/benchmarks/cython_proto/proto.c
+/benchmarks/cython_proto/build/

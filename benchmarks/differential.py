@@ -86,6 +86,12 @@ def _build(scale):
             data[key] = _records_text(corpus, lang, camel, sentences, offsets)
     data["xml/de_cmc"] = _records_xml(corpora.xml_sample(XML_SIZE[scale], SEED),
                                       "de_CMC", True)
+    # Real EmpiriST text (if available), validated with offsets + camelCase.
+    if corpora.empirist_available():
+        for sub in ("cmc", "web"):
+            corpus = corpora.load_empirist(sub)
+            data[f"empirist_off/{sub}"] = _records_text(corpus, "de_CMC", False, True, True)
+            data[f"empirist_camel/{sub}"] = _records_text(corpus, "de_CMC", True, True, False)
     return data
 
 

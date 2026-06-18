@@ -22,10 +22,36 @@ single repeated string (which would over-reward caches) nor random noise.
 """
 
 import hashlib
+import json
+import os
 import random
 from xml.sax.saxutils import escape as _xml_escape
 
-__all__ = ["CATEGORIES", "make_corpus", "corpus_stats", "xml_sample", "LANG_OF"]
+__all__ = ["CATEGORIES", "make_corpus", "corpus_stats", "xml_sample", "LANG_OF",
+           "empirist_available", "load_empirist"]
+
+# Real EmpiriST 2015 gold-standard text (CC-BY-SA), extracted from the corpus
+# VRT (space-joined gold tokens). Optional: present only if the file was built
+# from a local checkout of github.com/fau-klue/empirist-corpus. Gives the
+# benchmark and differential real German CMC/web vocabulary, not just synthetic.
+_EMPIRIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "empirist_real_text.json")
+
+
+def empirist_available():
+    return os.path.exists(_EMPIRIST_PATH)
+
+
+def load_empirist(subcorpus, n=None, seed=0):
+    """Real EmpiriST text for ``subcorpus`` in {'cmc', 'web'}. With ``n``,
+    deterministically sample (with replacement) to n paragraphs for
+    benchmarking; without, return all paragraphs (for the differential)."""
+    with open(_EMPIRIST_PATH, encoding="utf-8") as fh:
+        paras = json.load(fh)[subcorpus]
+    if n is None:
+        return paras
+    rng = random.Random(seed)
+    return [rng.choice(paras) for _ in range(n)]
 
 CATEGORIES = ["de_cmc", "en_web", "de_prose", "emoji", "mixed"]
 
