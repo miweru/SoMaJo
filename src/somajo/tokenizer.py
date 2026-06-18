@@ -298,6 +298,7 @@ class Tokenizer():
         # abbreviations with multiple dots that constitute tokens
         single_token_abbreviation_list = utils.read_abbreviation_file(f"single_token_abbreviations_{self.language[:2]}.txt")
         self.single_token_abbreviation = re.compile(r"(?<![\w.])(?:" + r'|'.join([re.escape(_) for _ in single_token_abbreviation_list]) + r')(?!\p{L})', re.IGNORECASE)
+        self._single_token_abbrev_lower = tuple(a.lower() for a in single_token_abbreviation_list)
         self.ps = re.compile(r"(?<!\d[ ])\bps\.", re.IGNORECASE)
         self.multipart_abbreviation = re.compile(r'(?:\p{L}+\.){2,}')
         # only abbreviations that are not matched by (?:\p{L}\.)+
@@ -487,6 +488,7 @@ class Tokenizer():
         # harness).
         self._guards = {
             self.mention: ("@",),                 # [@]\w+
+            self.email: ("@", "[at]"),            # …@… or … [at] … (regex is case-sensitive)
             self.entity: ("&",),                  # &…;
             self.action_word: ("*",),             # [*+]…[*]  (closing * always present)
             self.underline: ("_",),               # _…_
@@ -500,15 +502,20 @@ class Tokenizer():
             self.token_with_plus_ampersand: ("+", "&"),
             # Abbreviations: every pattern — and every lexicon entry (de+en,
             # verified) — requires a literal dot.
-            self.single_letter_ellipsis: (".",),
+            self.single_letter_ellipsis: ("...",),  # \p{L}\.{3}
             self.and_cetera: (".",),
-            self.str_abbreviations: (".",),
-            self.nr_abbreviations: (".",),
-            self.single_token_abbreviation: (".",),
             self.single_letter_abbreviation: (".",),
             self.ps: (".",),
             self.artikel: (".",),                 # \bArt.
             self.roman_ordinal: (".",),           # …\.  (Roman numerals, no digit)
+        }
+        # Case-insensitive variant: the trigger must be present in text.lower().
+        # For rules anchored on a case-insensitive literal (which the
+        # case-neutral self._guards cannot express safely).
+        self._guards_ci = {
+            self.str_abbreviations: ("str.",),                  # [\p{L}-]+str\.
+            self.nr_abbreviations: ("nr.",),                    # \w+\.-?Nr\.
+            self.single_token_abbreviation: self._single_token_abbrev_lower,
         }
 
     def _split_on_boundaries(self, node, boundaries, token_class, *, lock_match=True, delete_whitespace=False):
@@ -571,6 +578,11 @@ class Tokenizer():
         guard = self._guards.get(regex)
         if guard is not None and not any(s in text for s in guard):
             return
+        guard_ci = self._guards_ci.get(regex)
+        if guard_ci is not None:
+            low = text.lower()
+            if not any(s in low for s in guard_ci):
+                return
         boundaries = []
         if split_named_subgroups and regex.groupindex:
             group_numbers = self._group_numbers.get(regex)
