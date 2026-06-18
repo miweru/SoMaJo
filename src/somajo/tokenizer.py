@@ -391,6 +391,10 @@ class Tokenizer():
         self.number = re.compile(r"(?<!\w-?|\d[.,]?)" + number + r"(?![.,]?\d)", re.VERBOSE)
         self.ipv4 = re.compile(r"(?<!\w|\d[.,]?)(?:\d{1,3}[.]){3}\d{1,3}(?![.,]?\d)")
         self.section_number = re.compile(r"(?<!\w|\d[.,]?)(?:\d+[.])+\d+[.]?(?![.,]?\d)")
+        # Presence test for the date/number rule group. Uses \d (Unicode decimal
+        # digit), matching what those rules use, so it is a true superset and
+        # never skips a chunk that could match.
+        self._has_digit = re.compile(r"\d")
 
         # PUNCTUATION
         self.quest_exclam = re.compile(r"([!?]+)")
@@ -772,6 +776,12 @@ class Tokenizer():
             # normalize whitespace
             t.value.text = self.spaces.sub(" ", t.value.text)
 
+        # Compute paragraph-level feature flags once. Splitting only ever
+        # divides text, so a character absent from the whole paragraph is absent
+        # from every later sub-token — which lets whole rule groups be skipped
+        # for free instead of paying a per-token guard on every pass.
+        has_digit = any(self._has_digit.search(t.value.text) is not None for t in token_dll)
+
         # Some tokens are allowed to contain whitespace. Get those out
         # of the way first.
         # - XML tags
@@ -865,53 +875,55 @@ class Tokenizer():
             self._split_all_matches(self.en_nonbreaking_suffixes, token_dll)
 
         # measurements
-        self._split_all_matches(self.measurement, token_dll, "measurement")
+        if has_digit:
+            self._split_all_matches(self.measurement, token_dll, "measurement")
         # remove known abbreviations
         split_abbreviations = False if self.language == "en" or self.language == "en_PTB" else True
         self._split_abbreviations(token_dll, split_multipart_abbrevs=split_abbreviations)
         self._split_all_matches(self.artikel, token_dll, "abbreviation")
 
-        # DATES AND NUMBERS
-        self._split_all_matches(self.isbn, token_dll, "number", delete_whitespace=True)
-        # dates
-        split_dates = False if self.language == "en" or self.language == "en_PTB" else True
-        self._split_all_matches(self.three_part_date_year_first, token_dll, "date", split_named_subgroups=split_dates)
-        self._split_all_matches(self.three_part_date_dmy, token_dll, "date", split_named_subgroups=split_dates)
-        self._split_all_matches(self.three_part_date_mdy, token_dll, "date", split_named_subgroups=split_dates)
-        self._split_all_matches(self.two_part_date, token_dll, "date", split_named_subgroups=split_dates)
-        # time
-        if self.language == "en" or self.language == "en_PTB":
-            self._split_all_matches(self.en_time, token_dll, "time")
-        self._split_all_matches(self.time, token_dll, "time")
-        # US phone numbers and ZIP codes
-        if self.language == "en" or self.language == "en_PTB":
-            self._split_all_matches(self.en_us_phone_number, token_dll, "number")
-            self._split_all_matches(self.en_us_zip_code, token_dll, "number")
-            self._split_all_matches(self.en_numerical_identifiers, token_dll, "number")
-        # ordinals
-        if self.language == "de" or self.language == "de_CMC":
-            self._split_all_matches(self.ordinal, token_dll, "ordinal")
-        elif self.language == "en" or self.language == "en_PTB":
-            self._split_all_matches(self.english_ordinal, token_dll, "ordinal")
+        # DATES AND NUMBERS (every rule here needs a digit except roman_ordinal)
+        if has_digit:
+            self._split_all_matches(self.isbn, token_dll, "number", delete_whitespace=True)
+            # dates
+            split_dates = False if self.language == "en" or self.language == "en_PTB" else True
+            self._split_all_matches(self.three_part_date_year_first, token_dll, "date", split_named_subgroups=split_dates)
+            self._split_all_matches(self.three_part_date_dmy, token_dll, "date", split_named_subgroups=split_dates)
+            self._split_all_matches(self.three_part_date_mdy, token_dll, "date", split_named_subgroups=split_dates)
+            self._split_all_matches(self.two_part_date, token_dll, "date", split_named_subgroups=split_dates)
+            # time
+            if self.language == "en" or self.language == "en_PTB":
+                self._split_all_matches(self.en_time, token_dll, "time")
+            self._split_all_matches(self.time, token_dll, "time")
+            # US phone numbers and ZIP codes
+            if self.language == "en" or self.language == "en_PTB":
+                self._split_all_matches(self.en_us_phone_number, token_dll, "number")
+                self._split_all_matches(self.en_us_zip_code, token_dll, "number")
+                self._split_all_matches(self.en_numerical_identifiers, token_dll, "number")
+            # ordinals
+            if self.language == "de" or self.language == "de_CMC":
+                self._split_all_matches(self.ordinal, token_dll, "ordinal")
+            elif self.language == "en" or self.language == "en_PTB":
+                self._split_all_matches(self.english_ordinal, token_dll, "ordinal")
+        # roman ordinals contain no digit
         self._split_all_matches(self.roman_ordinal, token_dll, "ordinal")
-        # number ranges
-        self._split_all_matches(self.number_range, token_dll, "number", split_named_subgroups=True)
-        # fractions
-        self._split_all_matches(self.fraction, token_dll, "number")
-        # calculations
-        self._split_all_matches(self.calculation, token_dll, "number")
-        # amounts (1.000,-)
-        self._split_all_matches(self.amount, token_dll, "amount")
-        # semesters
-        self._split_all_matches(self.semester, token_dll, "semester")
-        # measurements
-        # self._split_all_matches(self.measurement, token_dll, "measurement")
-        # number compounds
-        self._split_all_matches(self.number_compound, token_dll, "regular")
-        # numbers
-        self._split_all_matches(self.number, token_dll, "number")
-        self._split_all_matches(self.ipv4, token_dll, "number")
-        self._split_all_matches(self.section_number, token_dll, "number")
+        if has_digit:
+            # number ranges
+            self._split_all_matches(self.number_range, token_dll, "number", split_named_subgroups=True)
+            # fractions
+            self._split_all_matches(self.fraction, token_dll, "number")
+            # calculations
+            self._split_all_matches(self.calculation, token_dll, "number")
+            # amounts (1.000,-)
+            self._split_all_matches(self.amount, token_dll, "amount")
+            # semesters
+            self._split_all_matches(self.semester, token_dll, "semester")
+            # number compounds
+            self._split_all_matches(self.number_compound, token_dll, "regular")
+            # numbers
+            self._split_all_matches(self.number, token_dll, "number")
+            self._split_all_matches(self.ipv4, token_dll, "number")
+            self._split_all_matches(self.section_number, token_dll, "number")
 
         # (clusters of) question marks and exclamation marks
         self._split_all_matches(self.quest_exclam, token_dll, "symbol")
