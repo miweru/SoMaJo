@@ -165,6 +165,7 @@ class Tokenizer():
         # high priority single tokens
         single_token_list = utils.read_abbreviation_file(f"single_tokens_{self.language[:2]}.txt")
         self.single_tokens = re.compile(r"(?<![\w.])(?:" + r'|'.join([re.escape(_) for _ in single_token_list]) + r')(?!\p{L})', re.IGNORECASE)
+        self._single_tokens_lower = tuple(t.lower() for t in single_token_list)
 
         # EMOTICONS
         emoticon_set = {"(-.-)", "(T_T)", "(♥_♥)", ")':", ")-:",
@@ -508,6 +509,7 @@ class Tokenizer():
             self.ps: (".",),
             self.artikel: (".",),                 # \bArt.
             self.roman_ordinal: (".",),           # …\.  (Roman numerals, no digit)
+            self.gender_marker: ("*", ":", "/"),  # \p{L}+[*:/]in…
         }
         # Case-insensitive variant: the trigger must be present in text.lower().
         # For rules anchored on a case-insensitive literal (which the
@@ -516,6 +518,15 @@ class Tokenizer():
             self.str_abbreviations: ("str.",),                  # [\p{L}-]+str\.
             self.nr_abbreviations: ("nr.",),                    # \w+\.-?Nr\.
             self.single_token_abbreviation: self._single_token_abbrev_lower,
+            self.single_tokens: self._single_tokens_lower,
+        }
+        # Regex variant: a necessary sub-pattern, cheaper to scan than the full
+        # rule, that must match for the rule to match at all.
+        self._guards_re = {
+            # url_without_protocol cannot match without a `.<known-TLD>`
+            self.url_without_protocol: re.compile(r"\.(?:de|com|tv|me|net|us|org|at|cc|ly|be|ch|info|live|eu|edu|gov|jpg|png|gif|log|txt|xlsx?|docx?|pptx?|pdf)", re.IGNORECASE),
+            # arrow needs '>' or '<' or a Unicode arrow
+            self.arrow: re.compile(r"[<>←-⇿]"),
         }
 
     def _split_on_boundaries(self, node, boundaries, token_class, *, lock_match=True, delete_whitespace=False):
@@ -583,6 +594,9 @@ class Tokenizer():
             low = text.lower()
             if not any(s in low for s in guard_ci):
                 return
+        guard_re = self._guards_re.get(regex)
+        if guard_re is not None and guard_re.search(text) is None:
+            return
         boundaries = []
         if split_named_subgroups and regex.groupindex:
             group_numbers = self._group_numbers.get(regex)
