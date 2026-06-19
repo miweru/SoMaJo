@@ -35,8 +35,9 @@ jobs:
           # isolation so setup.py can import mypyc.build.
           CIBW_BEFORE_BUILD: "pip install mypy setuptools wheel regex"
           CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          # CPython 3.9-3.13; skip PyPy, musllinux, and 32-bit targets.
-          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
+          # CPython 3.8-3.13 (matches requires-python >= 3.8 in pyproject.toml);
+          # skip PyPy, musllinux, and 32-bit targets.
+          CIBW_BUILD: "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-*"
           CIBW_SKIP: "pp* *-musllinux* *_i686 *-win32"
           # Fail the build if a wheel silently shipped the pure-Python fallback.
           CIBW_TEST_COMMAND: "python {project}/tests/smoke_compiled.py"

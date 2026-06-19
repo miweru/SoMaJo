@@ -63,6 +63,11 @@ class SoMaJo:
     character_offsets : bool, (default=False)
         Compute the character offsets in the input for each token.
         This allows for stand-off tokenization.
+    fast : bool, (default=False)
+        Use the opt-in single-pass tokenizer (~7-8x faster, ~99.7% token
+        F1 on EmpiriST vs ~99.8% for the default). It is NOT byte-identical
+        to the default tokenizer and does not support ``character_offsets``
+        or XML input.
 
     """
 
@@ -87,7 +92,8 @@ class SoMaJo:
             # Opt-in single-pass tokenizer: ~7-8x faster, ~99.5-99.9% F1 vs the
             # exact tokenizer's ~99.6-99.9% on EmpiriST (within ~0.01 pp). It is
             # NOT byte-identical and does not support character offsets or XML.
-            assert not character_offsets, "fast=True does not support character_offsets"
+            if character_offsets:
+                raise ValueError("fast=True does not support character_offsets")
             from .fast_tokenizer import FastTokenizer
             self._fast_tokenizer = FastTokenizer(language=language, split_camel_case=split_camel_case)
         else:
@@ -186,7 +192,8 @@ class SoMaJo:
         return tokens
 
     def _tokenize_xml(self, xml_data, is_file, eos_tags, strip_tags, parallel, prune_tags):
-        assert not self.fast, "fast=True does not support XML input; use the default tokenizer."
+        if self.fast:
+            raise ValueError("fast=True does not support XML input; use the default tokenizer.")
         if eos_tags is not None:
             eos_tags = set(eos_tags)
         if prune_tags is not None:

@@ -44,6 +44,32 @@ class TestEnglishTokenizer(TestTokenizer):
         self.tokenizer = Tokenizer(language="en_PTB", split_camel_case=True)
 
 
+class TestUnicodeFoldingGate(unittest.TestCase):
+    """Regression for the abbreviation prefilter gate and U+0130 (İ).
+
+    İ is the only codepoint in all of Unicode whose lowercasing is not
+    length-preserving ("İ".lower() == "i" + U+0307), which desyncs the gate's
+    lowercased-substring probe from the original text. The gate must then defer
+    to the ungated IGNORECASE engine so the output stays byte-identical with the
+    pre-gate cascade. The differential corpus contains no İ, so this byte-exact
+    case is only covered here.
+    """
+
+    def setUp(self):
+        self.tokenizer = Tokenizer(language="de_CMC", split_camel_case=True)
+
+    def _toks(self, raw):
+        dll = DLL([Token(raw, first_in_sentence=True, last_in_sentence=True)])
+        return [t.text for t in self.tokenizer._tokenize(dll)]
+
+    def test_dotted_capital_i_does_not_drop_abbreviation(self):
+        # Without the gate fallthrough these would lose the abbreviation dot,
+        # e.g. "İT.NRW" -> ["İT", ".", "NRW"].
+        self.assertEqual(self._toks("İT.NRW"), ["İT.", "NRW"])
+        self.assertEqual(self._toks("İtal. Wort"), ["İtal.", "Wort"])
+        self.assertEqual(self._toks("İnkl. MwSt"), ["İnkl.", "MwSt"])
+
+
 class TestTokenizerDeprecated(TestTokenizer):
     def _equal(self, raw, tokenized):
         if isinstance(tokenized, str):

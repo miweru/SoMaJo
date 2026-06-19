@@ -78,7 +78,8 @@ class TestFastModeAPI(unittest.TestCase):
         self.assertEqual(len(sents), 2)
 
     def test_fast_rejects_character_offsets(self):
-        with self.assertRaises(AssertionError):
+        # ValueError (not assert) so it still raises under `python -O`.
+        with self.assertRaises(ValueError):
             SoMaJo("de_CMC", fast=True, character_offsets=True)
 
     def test_fast_parallel_matches_serial(self):

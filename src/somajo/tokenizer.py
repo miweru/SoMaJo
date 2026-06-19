@@ -330,8 +330,13 @@ class Tokenizer():
         # unless a match is *possible*, which it cannot be without either a
         # structural `(\p{L}\.){2,}` run or a lexicon entry starting at a
         # position not preceded by a letter or dot. Both are necessary
-        # conditions, so the gate never changes the output (verified by the
-        # differential harness and an exhaustive per-entry test).
+        # conditions. The one wrinkle is U+0130 (İ) — the only codepoint whose
+        # lowercasing is not length-preserving ("İ".lower() == "i̇") — which
+        # would desync the substring probing from `text`; a token containing it
+        # is therefore deferred to the ungated IGNORECASE engine (see
+        # _abbreviation_possible and the len(low) == len(text) fallback in
+        # _split_abbreviations). With that handled, the gate never changes the
+        # output (verified by the differential harness and a per-entry test).
         self._abbrev_struct = re.compile(r"(?<![\p{L}.])(?:\p{L}\.){2,}", re.IGNORECASE)
         self._abbrev_start = re.compile(r"(?<![\p{L}.])\p{L}")
         self._abbrev_dotted = frozenset(a for a in abbreviation_list if a.endswith("."))
@@ -620,7 +625,10 @@ class Tokenizer():
         guard_ci = self._guards_ci.get(regex)
         if guard_ci is not None:
             low = text.lower()
-            if not any(s in low for s in guard_ci):
+            # Only trust the lowercased-substring probe when lowercasing is
+            # length-preserving; U+0130 (İ) is the sole exception and would let
+            # a real IGNORECASE match slip past the guard, so fall through then.
+            if len(low) == len(text) and not any(s in low for s in guard_ci):
                 return
         guard_re = self._guards_re.get(regex)
         if guard_re is not None and guard_re.search(text) is None:
@@ -742,6 +750,13 @@ class Tokenizer():
         expensive alternation on it cannot change the output.
         """
         low = text.lower()
+        if len(low) != len(text):
+            # U+0130 (İ) is the only codepoint with a non-length-preserving
+            # lowercasing; it desyncs the substring probing below from `text`.
+            # Don't try to prove impossibility — defer to the ungated IGNORECASE
+            # engine (the len(low) == len(text) fallback in _split_abbreviations)
+            # so the output stays byte-identical with the pre-gate cascade.
+            return True
         if "." not in low:
             return False
         # structural (\p{L}\.){2,} run
