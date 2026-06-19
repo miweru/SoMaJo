@@ -76,13 +76,13 @@ class TestDLL(unittest.TestCase):
         dll = DLL([1, 2, 3, 4])
         x = dll.next_matching(dll.first, operator.attrgetter("value"), 2)
         self.assertEqual(x.value, 2)
-        self.assertEqual([e.value for e in dll.__iter__(start=x)], [2, 3, 4])
+        self.assertEqual([e.value for e in dll.iterate(start=x)], [2, 3, 4])
 
     def test_dll_14(self):
         dll = DLL([1, 2, 3, 4])
         x = dll.previous_matching(dll.last, operator.attrgetter("value"), 3)
         self.assertEqual(x.value, 3)
-        self.assertEqual([e.value for e in dll.__reversed__(start=x)], [3, 2, 1])
+        self.assertEqual([e.value for e in dll.iterate_reversed(start=x)], [3, 2, 1])
 
     def test_dll_15(self):
         dll = DLL([1, 2, 3, 4])

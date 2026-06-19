@@ -165,6 +165,7 @@ class Tokenizer():
         # high priority single tokens
         single_token_list = utils.read_abbreviation_file(f"single_tokens_{self.language[:2]}.txt")
         self.single_tokens = re.compile(r"(?<![\w.])(?:" + r'|'.join([re.escape(_) for _ in single_token_list]) + r')(?!\p{L})', re.IGNORECASE)
+        self._single_tokens_lower = tuple(t.lower() for t in single_token_list)
 
         # EMOTICONS
         emoticon_set = {"(-.-)", "(T_T)", "(♥_♥)", ")':", ")-:",
@@ -251,6 +252,17 @@ class Tokenizer():
         # self.unicode_symbols = re.compile(r"[\u2600-\u27BF\uFE0E\uFE0F\U0001F300-\U0001f64f\U0001F680-\U0001F6FF\U0001F900-\U0001F9FF]")
         self.symbols_and_dingbats = re.compile(r"[\u2600-\u27BF]")
         self.unicode_flags = re.compile(r"\p{Regional_Indicator}{2}\uFE0F?")
+        # Precompiled patterns for _split_emojis (the #1 hotspot). The grapheme
+        # scan and per-grapheme property tests run over every token, so leaving
+        # them as uncompiled module-level calls paid the regex-module flag
+        # dispatch overhead on every call.
+        self._grapheme = re.compile(r"\X")
+        # `_emoji_trigger` is the UNION of the two per-grapheme classes below
+        # (incl. U+FE0F): if not even one such codepoint is present in a token,
+        # no grapheme can match and the whole scan is skippable without any
+        # change to the output. It doubles as the presence gate.
+        self._emoji_trigger = re.compile(r"[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F]")
+        self._emoji_single = re.compile(r"[\p{Extended_Pictographic}\p{Emoji_Presentation}]")
 
         # special tokens containing + or &
         tokens_with_plus_or_ampersand = utils.read_abbreviation_file("tokens_with_plus_or_ampersand.txt")
@@ -287,6 +299,7 @@ class Tokenizer():
         # abbreviations with multiple dots that constitute tokens
         single_token_abbreviation_list = utils.read_abbreviation_file(f"single_token_abbreviations_{self.language[:2]}.txt")
         self.single_token_abbreviation = re.compile(r"(?<![\w.])(?:" + r'|'.join([re.escape(_) for _ in single_token_abbreviation_list]) + r')(?!\p{L})', re.IGNORECASE)
+        self._single_token_abbrev_lower = tuple(a.lower() for a in single_token_abbreviation_list)
         self.ps = re.compile(r"(?<!\d[ ])\bps\.", re.IGNORECASE)
         self.multipart_abbreviation = re.compile(r'(?:\p{L}+\.){2,}')
         # only abbreviations that are not matched by (?:\p{L}\.)+
@@ -295,13 +308,40 @@ class Tokenizer():
         # self.simple_abbreviations = set([a[0].lower() for a in abbrev_simple if a[1]])
         # self.simple_abbreviation_candidates = re.compile(r"(?<![\w.])\p{L}{2,}\.(?!\p{L}{1,3}\.)")
         # abbreviation_list = [a[0] for a in abbrev_simple if not a[1]]
-        self.abbreviation = re.compile(r"(?<![\p{L}.])(?:" +
-                                       r"(?:(?:\p{L}\.){2,})" +
-                                       r"|" +
-                                       # r"(?i:" +    # this part should be case insensitive
-                                       r'|'.join([re.escape(_) for _ in abbreviation_list]) +
-                                       # r"))+(?!\p{L}{1,3}\.)", re.V1)
-                                       r")+(?!\p{L}{1,3}\.)", re.IGNORECASE)
+        _abbrev_pattern = (r"(?<![\p{L}.])(?:" +
+                           r"(?:(?:\p{L}\.){2,})" +
+                           r"|" +
+                           r'|'.join([re.escape(_) for _ in abbreviation_list]) +
+                           r")+(?!\p{L}{1,3}\.)")
+        self.abbreviation = re.compile(_abbrev_pattern, re.IGNORECASE)
+        # Same pattern WITHOUT IGNORECASE, for matching against text.lower()
+        # (the lexicon is already lowercased). Used only on chunks where
+        # lowercasing is length-preserving, so match spans map 1:1 back to the
+        # original text. This swaps the engine's Unicode case-folding for
+        # str.lower(); the two agree for German and any text with simple,
+        # length-preserving lowercasing. Approved relaxation: output can differ
+        # from strict IGNORECASE only on exotic non-German case-folding (e.g.
+        # Greek final sigma) occurring inside an abbreviation — which does not
+        # happen in real German CMC text, so the differential stays green.
+        self._abbreviation_lower = re.compile(_abbrev_pattern)
+        # Fast gate for the self.abbreviation pass. That 1000+-literal
+        # alternation is the single most expensive rule in the cascade (~25% of
+        # runtime), yet it matches nothing on most chunks. The gate skips it
+        # unless a match is *possible*, which it cannot be without either a
+        # structural `(\p{L}\.){2,}` run or a lexicon entry starting at a
+        # position not preceded by a letter or dot. Both are necessary
+        # conditions. The one wrinkle is U+0130 (İ) — the only codepoint whose
+        # lowercasing is not length-preserving ("İ".lower() == "i̇") — which
+        # would desync the substring probing from `text`; a token containing it
+        # is therefore deferred to the ungated IGNORECASE engine (see
+        # _abbreviation_possible and the len(low) == len(text) fallback in
+        # _split_abbreviations). With that handled, the gate never changes the
+        # output (verified by the differential harness and a per-entry test).
+        self._abbrev_struct = re.compile(r"(?<![\p{L}.])(?:\p{L}\.){2,}", re.IGNORECASE)
+        self._abbrev_start = re.compile(r"(?<![\p{L}.])\p{L}")
+        self._abbrev_dotted = frozenset(a for a in abbreviation_list if a.endswith("."))
+        self._abbrev_nodot = tuple(a for a in abbreviation_list if not a.endswith("."))
+        self._abbrev_maxlen = max((len(a) for a in abbreviation_list), default=0)
         self.artikel = re.compile(r"\bArt.(?=\s?\d)", re.IGNORECASE)
 
         # MENTIONS, HASHTAGS, ACTION WORDS, UNDERLINE
@@ -367,6 +407,10 @@ class Tokenizer():
         self.number = re.compile(r"(?<!\w-?|\d[.,]?)" + number + r"(?![.,]?\d)", re.VERBOSE)
         self.ipv4 = re.compile(r"(?<!\w|\d[.,]?)(?:\d{1,3}[.]){3}\d{1,3}(?![.,]?\d)")
         self.section_number = re.compile(r"(?<!\w|\d[.,]?)(?:\d+[.])+\d+[.]?(?![.,]?\d)")
+        # Presence test for the date/number rule group. Uses \d (Unicode decimal
+        # digit), matching what those rules use, so it is a true superset and
+        # never skips a chunk that could match.
+        self._has_digit = re.compile(r"\d")
 
         # PUNCTUATION
         self.quest_exclam = re.compile(r"([!?]+)")
@@ -446,6 +490,78 @@ class Tokenizer():
         self.dot = re.compile(r'(\.)')
         # Soft hyphen ­ „“
 
+        # Cache of sorted named-group numbers per regex, filled lazily in
+        # _split_matches so the sort runs once per pattern, not once per call.
+        self._group_numbers = {}
+        # Cheap per-pass prefilter: each listed rule cannot produce a match
+        # unless at least one of its trigger substrings is present in the token.
+        # Skipping finditer when none is present removes per-pass Python
+        # overhead without changing the output. ONLY case-neutral
+        # symbols/digits are used as triggers, so the case-insensitive rules
+        # remain safe. Each trigger is a proven *necessary* condition for the
+        # pattern (verified against the regex source, gated by the differential
+        # harness).
+        self._guards = {
+            self.mention: ("@",),                 # [@]\w+
+            self.email: ("@", "[at]"),            # …@… or … [at] … (regex is case-sensitive)
+            self.entity: ("&",),                  # &…;
+            self.action_word: ("*",),             # [*+]…[*]  (closing * always present)
+            self.underline: ("_",),               # _…_
+            self.de_slash: ("/",),                # /+
+            self.reddit_links: ("/",),            # …(?:/\w+)+…
+            self.markdown_links: ("](",),         # ]( appear adjacent in the pattern
+            self.heart_emoticon: ("3",),          # [<^]3
+            self.hashtag_sequence: ("#",),        # (?:[#]\w…)+
+            self.single_hashtag: ("#",),          # [#]\w…
+            # every lexicon entry contains a '+' or '&' (verified)
+            self.token_with_plus_ampersand: ("+", "&"),
+            # Abbreviations: every pattern — and every lexicon entry (de+en,
+            # verified) — requires a literal dot.
+            self.single_letter_ellipsis: ("...",),  # \p{L}\.{3}
+            self.and_cetera: (".",),
+            self.single_letter_abbreviation: (".",),
+            self.ps: (".",),
+            self.artikel: (".",),                 # \bArt.
+            self.roman_ordinal: (".",),           # …\.  (Roman numerals, no digit)
+            self.gender_marker: ("*", ":", "/"),  # \p{L}+[*:/]in…
+            # audit pass — more rare-anchor gates, each a verified necessary
+            # condition of every match (byte-identical, differential-gated).
+            self.amount: (",-", ".-"),                # \d…[,.]-
+            self.letter_apostrophe_word: ("'", "’"),  # \b[dlo]['’]\p{L}+
+            self.double_latex_quote: ("`", "'"),      # `` or ''
+            self.paired_single_latex_quote: ("`",),   # `…'  (backtick mandatory)
+            self.paired_single_quot_mark: ("'",),     # '…'  (ASCII apostrophe)
+            self.letter_sharp: ("#",),                # \b[acdfg]#
+            self.emoji: ("emojiQ",),                  # \bemojiQ\p{L}{3,} (case-sensitive)
+            self.space_emoticon: (": (", ": )", "; (", "; )"),  # [:;] [()]
+        }
+        # Case-insensitive variant: the trigger must be present in text.lower().
+        # For rules anchored on a case-insensitive literal (which the
+        # case-neutral self._guards cannot express safely).
+        self._guards_ci = {
+            self.str_abbreviations: ("str.",),                  # [\p{L}-]+str\.
+            self.nr_abbreviations: ("nr.",),                    # \w+\.-?Nr\.
+            self.single_token_abbreviation: self._single_token_abbrev_lower,
+            self.single_tokens: self._single_tokens_lower,
+            self.doi: ("doi:10.",),                # \bdoi:10\.…
+            self.doi_with_space: ("doi: ",),       # (?<=\bdoi: )…
+            self.xml_declaration: ("<?xml",),      # <\?xml…\?>
+            self.simple_url: ("://", "www."),      # scheme:// or www.
+            self.simple_url_with_brackets: ("://", "www."),
+        }
+        # Regex variant: a necessary sub-pattern, cheaper to scan than the full
+        # rule, that must match for the rule to match at all.
+        self._guards_re = {
+            # url_without_protocol cannot match without a `.<known-TLD>`
+            self.url_without_protocol: re.compile(r"\.(?:de|com|tv|me|net|us|org|at|cc|ly|be|ch|info|live|eu|edu|gov|jpg|png|gif|log|txt|xlsx?|docx?|pptx?|pdf)", re.IGNORECASE),
+            # arrow needs '>' or '<' or a Unicode arrow
+            self.arrow: re.compile(r"[<>←-⇿]"),
+        }
+        # isascii reject: these rules' character classes are entirely > U+007F
+        # (symbols/dingbats U+2600–27BF; Regional_Indicator flag letters), so a
+        # pure-ASCII token can never match — skip via a cheap C-level isascii().
+        self._guards_isascii = frozenset((self.symbols_and_dingbats, self.unicode_flags))
+
     def _split_on_boundaries(self, node, boundaries, token_class, *, lock_match=True, delete_whitespace=False):
         """"""
         n = len(boundaries)
@@ -502,29 +618,57 @@ class Tokenizer():
         token_dll.remove(node)
 
     def _split_matches(self, regex, node, token_class="regular", repl=None, split_named_subgroups=True, delete_whitespace=False):
+        text = node.value.text
+        guard = self._guards.get(regex)
+        if guard is not None and not any(s in text for s in guard):
+            return
+        guard_ci = self._guards_ci.get(regex)
+        if guard_ci is not None:
+            low = text.lower()
+            # Only trust the lowercased-substring probe when lowercasing is
+            # length-preserving; U+0130 (İ) is the sole exception and would let
+            # a real IGNORECASE match slip past the guard, so fall through then.
+            if len(low) == len(text) and not any(s in low for s in guard_ci):
+                return
+        guard_re = self._guards_re.get(regex)
+        if guard_re is not None and guard_re.search(text) is None:
+            return
+        if regex in self._guards_isascii and text.isascii():
+            return
         boundaries = []
-        split_groups = split_named_subgroups and len(regex.groupindex) > 0
-        group_numbers = sorted(regex.groupindex.values())
-        for m in regex.finditer(node.value.text):
-            if split_groups:
+        if split_named_subgroups and regex.groupindex:
+            group_numbers = self._group_numbers.get(regex)
+            if group_numbers is None:
+                group_numbers = sorted(regex.groupindex.values())
+                self._group_numbers[regex] = group_numbers
+            for m in regex.finditer(text):
                 for g in group_numbers:
                     if m.span(g) != (-1, -1):
                         boundaries.append((m.start(g), m.end(g), None))
-            else:
-                if repl is None:
-                    boundaries.append((m.start(), m.end(), None))
-                else:
-                    boundaries.append((m.start(), m.end(), m.expand(repl)))
+        elif repl is None:
+            for m in regex.finditer(text):
+                boundaries.append((m.start(), m.end(), None))
+        else:
+            for m in regex.finditer(text):
+                boundaries.append((m.start(), m.end(), m.expand(repl)))
         self._split_on_boundaries(node, boundaries, token_class, delete_whitespace=delete_whitespace)
 
     def _split_emojis(self, node, token_class="emoticon"):
+        text = node.value.text
+        # Fast path: every emoji-relevant codepoint is > U+007F and lies in the
+        # Extended_Pictographic / Emoji_Presentation / U+FE0F set. If the token
+        # has none, the grapheme scan below can yield no boundary, so skip it.
+        # `isascii()` is a cheap C-level reject for the overwhelmingly common
+        # ASCII case; the presence test handles non-ASCII (e.g. umlauts) tokens.
+        if text.isascii() or self._emoji_trigger.search(text) is None:
+            return
         boundaries = []
-        for m in re.finditer(r"\X", node.value.text):
+        for m in self._grapheme.finditer(text):
             if m.end() - m.start() > 1:
-                if re.search(r"[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F]", m.group()):
+                if self._emoji_trigger.search(m.group()):
                     boundaries.append((m.start(), m.end(), None))
             else:
-                if re.search(r"[\p{Extended_Pictographic}\p{Emoji_Presentation}]", m.group()):
+                if self._emoji_single.search(m.group()):
                     boundaries.append((m.start(), m.end(), None))
         self._split_on_boundaries(node, boundaries, token_class)
 
@@ -558,11 +702,15 @@ class Tokenizer():
         the matches for regex1 into tokens.
 
         """
+        guard = self._guards.get(regex1)
         for t in token_dll:
             if t.value.markup or t.value._locked:
                 continue
+            text = t.value.text
+            if guard is not None and not any(s in text for s in guard):
+                continue
             boundaries = []
-            for m1 in regex1.finditer(t.value.text):
+            for m1 in regex1.finditer(text):
                 for m2 in regex2.finditer(m1.group(0)):
                     boundaries.append((m2.start() + m1.start(), m2.end() + m1.start(), None))
             self._split_on_boundaries(t, boundaries, token_class, delete_whitespace=delete_whitespace)
@@ -595,6 +743,44 @@ class Tokenizer():
                 continue
             self._split_left(regex, t)
 
+    def _abbreviation_possible(self, text):
+        """Cheap, conservative necessary-condition test for self.abbreviation.
+
+        Returns False only when no abbreviation match is possible, so gating the
+        expensive alternation on it cannot change the output.
+        """
+        low = text.lower()
+        if len(low) != len(text):
+            # U+0130 (İ) is the only codepoint with a non-length-preserving
+            # lowercasing; it desyncs the substring probing below from `text`.
+            # Don't try to prove impossibility — defer to the ungated IGNORECASE
+            # engine (the len(low) == len(text) fallback in _split_abbreviations)
+            # so the output stays byte-identical with the pre-gate cascade.
+            return True
+        if "." not in low:
+            return False
+        # structural (\p{L}\.){2,} run
+        if self._abbrev_struct.search(text):
+            return True
+        # the few lexicon entries that do not end in a dot (substring is enough)
+        for w in self._abbrev_nodot:
+            if w in low:
+                return True
+        # dot-terminated lexicon entries: at every valid start, test each
+        # dot-terminated prefix (bounded by the longest entry) against the set
+        dotted = self._abbrev_dotted
+        maxlen = self._abbrev_maxlen
+        n = len(low)
+        for m in self._abbrev_start.finditer(low):
+            p = m.start()
+            seg = low[p:min(p + maxlen, n)]
+            i = seg.find(".")
+            while i != -1:
+                if seg[:i + 1] in dotted:
+                    return True
+                i = seg.find(".", i + 1)
+        return False
+
     def _split_abbreviations(self, token_dll, split_multipart_abbrevs=True):
         """Turn instances of abbreviations into tokens."""
         self._split_all_matches(self.single_letter_ellipsis, token_dll, "abbreviation")
@@ -608,8 +794,19 @@ class Tokenizer():
         for t in token_dll:
             if t.value.markup or t.value._locked:
                 continue
+            text = t.value.text
+            if not self._abbreviation_possible(text):
+                continue
+            # Match against lowercased text with the non-IGNORECASE pattern when
+            # that is length-preserving (so spans map 1:1); fall back to the
+            # case-insensitive engine otherwise. See _abbreviation_lower.
+            low = text.lower()
+            if len(low) == len(text):
+                matches = self._abbreviation_lower.finditer(low)
+            else:
+                matches = self.abbreviation.finditer(text)
             boundaries = []
-            for m in self.abbreviation.finditer(t.value.text):
+            for m in matches:
                 instance = m.group(0)
                 if split_multipart_abbrevs and self.multipart_abbreviation.fullmatch(instance):
                     start, end = m.span(0)
@@ -658,6 +855,12 @@ class Tokenizer():
             t.value.text = self.stranded_variation_selector.sub("", t.value.text)
             # normalize whitespace
             t.value.text = self.spaces.sub(" ", t.value.text)
+
+        # Compute paragraph-level feature flags once. Splitting only ever
+        # divides text, so a character absent from the whole paragraph is absent
+        # from every later sub-token — which lets whole rule groups be skipped
+        # for free instead of paying a per-token guard on every pass.
+        has_digit = any(self._has_digit.search(t.value.text) is not None for t in token_dll)
 
         # Some tokens are allowed to contain whitespace. Get those out
         # of the way first.
@@ -752,53 +955,55 @@ class Tokenizer():
             self._split_all_matches(self.en_nonbreaking_suffixes, token_dll)
 
         # measurements
-        self._split_all_matches(self.measurement, token_dll, "measurement")
+        if has_digit:
+            self._split_all_matches(self.measurement, token_dll, "measurement")
         # remove known abbreviations
         split_abbreviations = False if self.language == "en" or self.language == "en_PTB" else True
         self._split_abbreviations(token_dll, split_multipart_abbrevs=split_abbreviations)
         self._split_all_matches(self.artikel, token_dll, "abbreviation")
 
-        # DATES AND NUMBERS
-        self._split_all_matches(self.isbn, token_dll, "number", delete_whitespace=True)
-        # dates
-        split_dates = False if self.language == "en" or self.language == "en_PTB" else True
-        self._split_all_matches(self.three_part_date_year_first, token_dll, "date", split_named_subgroups=split_dates)
-        self._split_all_matches(self.three_part_date_dmy, token_dll, "date", split_named_subgroups=split_dates)
-        self._split_all_matches(self.three_part_date_mdy, token_dll, "date", split_named_subgroups=split_dates)
-        self._split_all_matches(self.two_part_date, token_dll, "date", split_named_subgroups=split_dates)
-        # time
-        if self.language == "en" or self.language == "en_PTB":
-            self._split_all_matches(self.en_time, token_dll, "time")
-        self._split_all_matches(self.time, token_dll, "time")
-        # US phone numbers and ZIP codes
-        if self.language == "en" or self.language == "en_PTB":
-            self._split_all_matches(self.en_us_phone_number, token_dll, "number")
-            self._split_all_matches(self.en_us_zip_code, token_dll, "number")
-            self._split_all_matches(self.en_numerical_identifiers, token_dll, "number")
-        # ordinals
-        if self.language == "de" or self.language == "de_CMC":
-            self._split_all_matches(self.ordinal, token_dll, "ordinal")
-        elif self.language == "en" or self.language == "en_PTB":
-            self._split_all_matches(self.english_ordinal, token_dll, "ordinal")
+        # DATES AND NUMBERS (every rule here needs a digit except roman_ordinal)
+        if has_digit:
+            self._split_all_matches(self.isbn, token_dll, "number", delete_whitespace=True)
+            # dates
+            split_dates = False if self.language == "en" or self.language == "en_PTB" else True
+            self._split_all_matches(self.three_part_date_year_first, token_dll, "date", split_named_subgroups=split_dates)
+            self._split_all_matches(self.three_part_date_dmy, token_dll, "date", split_named_subgroups=split_dates)
+            self._split_all_matches(self.three_part_date_mdy, token_dll, "date", split_named_subgroups=split_dates)
+            self._split_all_matches(self.two_part_date, token_dll, "date", split_named_subgroups=split_dates)
+            # time
+            if self.language == "en" or self.language == "en_PTB":
+                self._split_all_matches(self.en_time, token_dll, "time")
+            self._split_all_matches(self.time, token_dll, "time")
+            # US phone numbers and ZIP codes
+            if self.language == "en" or self.language == "en_PTB":
+                self._split_all_matches(self.en_us_phone_number, token_dll, "number")
+                self._split_all_matches(self.en_us_zip_code, token_dll, "number")
+                self._split_all_matches(self.en_numerical_identifiers, token_dll, "number")
+            # ordinals
+            if self.language == "de" or self.language == "de_CMC":
+                self._split_all_matches(self.ordinal, token_dll, "ordinal")
+            elif self.language == "en" or self.language == "en_PTB":
+                self._split_all_matches(self.english_ordinal, token_dll, "ordinal")
+        # roman ordinals contain no digit
         self._split_all_matches(self.roman_ordinal, token_dll, "ordinal")
-        # number ranges
-        self._split_all_matches(self.number_range, token_dll, "number", split_named_subgroups=True)
-        # fractions
-        self._split_all_matches(self.fraction, token_dll, "number")
-        # calculations
-        self._split_all_matches(self.calculation, token_dll, "number")
-        # amounts (1.000,-)
-        self._split_all_matches(self.amount, token_dll, "amount")
-        # semesters
-        self._split_all_matches(self.semester, token_dll, "semester")
-        # measurements
-        # self._split_all_matches(self.measurement, token_dll, "measurement")
-        # number compounds
-        self._split_all_matches(self.number_compound, token_dll, "regular")
-        # numbers
-        self._split_all_matches(self.number, token_dll, "number")
-        self._split_all_matches(self.ipv4, token_dll, "number")
-        self._split_all_matches(self.section_number, token_dll, "number")
+        if has_digit:
+            # number ranges
+            self._split_all_matches(self.number_range, token_dll, "number", split_named_subgroups=True)
+            # fractions
+            self._split_all_matches(self.fraction, token_dll, "number")
+            # calculations
+            self._split_all_matches(self.calculation, token_dll, "number")
+            # amounts (1.000,-)
+            self._split_all_matches(self.amount, token_dll, "amount")
+            # semesters
+            self._split_all_matches(self.semester, token_dll, "semester")
+            # number compounds
+            self._split_all_matches(self.number_compound, token_dll, "regular")
+            # numbers
+            self._split_all_matches(self.number, token_dll, "number")
+            self._split_all_matches(self.ipv4, token_dll, "number")
+            self._split_all_matches(self.section_number, token_dll, "number")
 
         # (clusters of) question marks and exclamation marks
         self._split_all_matches(self.quest_exclam, token_dll, "symbol")

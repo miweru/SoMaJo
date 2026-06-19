@@ -85,6 +85,11 @@ somajo-tokenizer --split_sentences <file> | somewe-tagger --tag <model> -
       the XML into plain text
   - Parallelization: Optionally run multiple worker processes to speed
     up tokenization
+  - Optional single-pass [fast mode](#fast-mode) (`fast=True` /
+    `--fast`): ~7–8× faster on a single core at ~99.7 % token F1 on
+    the EmpiriST gold standard (within ~0.01 pp of the exact
+    tokenizer) — near-gold accuracy for throughput-bound work over
+    large corpora
 
 
 ## Installation
@@ -411,6 +416,56 @@ for sentence in sentences:
     for token in sentence:
         print(token.text)
     print()
+```
+
+
+## Fast mode
+
+The default tokenizer is *exact*: it applies SoMaJo's full cascade of
+rules to reproduce the EmpiriST guidelines as closely as possible. For
+throughput-bound work over large corpora, there is an opt-in **fast
+mode** that tokenizes each line in a single priority-ordered regex pass
+(plus a small lexicon post-pass) instead of the ~60 sequential rule
+passes. It is a full drop-in — it produces the same `Token` objects
+(with token classes, `SpaceAfter`/`OriginalSpelling` info and optional
+sentence splitting), works with `--parallel`, and supports both German
+(`de_CMC`, well tuned) and English (`en_PTB`, less tuned).
+
+On a single core it is roughly **7–8× faster** end-to-end while reaching
+**~99.7 % token F₁** on the EmpiriST gold standard — within ~0.01 pp of
+the exact tokenizer (and on the web subset it actually edges ahead):
+
+| Corpus | exact F₁ | fast F₁ |
+|--------|----------|---------|
+| CMC    | 99.59    | 99.56   |
+| Web    | 99.91    | 99.92   |
+
+(Both columns are measured the same way — token-boundary F₁ via the
+bundled `benchmarks/accuracy.py` harness — so they are directly
+comparable; the absolute numbers may differ slightly from the official
+[Evaluation](#evaluation) figures below, which use a different setup.)
+
+Fast mode is **not byte-identical** to the default tokenizer and does
+**not** support `character_offsets` or the XML pipeline. Use the
+default, accuracy-first tokenizer whenever every token must match the
+guidelines exactly; use fast mode when near-gold accuracy is enough and
+speed matters.
+
+```python
+from somajo import SoMaJo
+
+tokenizer = SoMaJo("de_CMC", split_camel_case=True, fast=True)
+sentences = tokenizer.tokenize_text(["Heyi:) Was machst du z.B. morgen Abend?!"])
+for sentence in sentences:
+    for token in sentence:
+        print(token.text, token.token_class)
+    print()
+```
+
+On the command line, add the `--fast` option:
+
+```sh
+somajo-tokenizer --fast --split_sentences example_empirist.txt
 ```
 
 

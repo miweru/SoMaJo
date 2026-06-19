@@ -1,0 +1,60 @@
+name: wheels
+
+# Build mypyc-compiled binary wheels (and a pure-Python sdist fallback).
+# Build-only: artifacts are uploaded, never published to PyPI.
+#
+# Trigger manually from the Actions tab, or on a version tag. CI is heavy
+# (one build per Python x OS), so it deliberately does NOT run on every push.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build_wheels:
+    name: wheels ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 = arm64, macos-13 = x86_64. Add ubuntu aarch64 via QEMU if
+        # you need it (uncomment docker/setup-qemu-action + CIBW_ARCHS_LINUX).
+        os: [ubuntu-latest, macos-14, macos-13, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          # mypyc-compile the hot modules; setup.py reads SOMAJO_MYPYC.
+          CIBW_ENVIRONMENT: "SOMAJO_MYPYC=1"
+          # mypy is intentionally NOT in [build-system].requires (keeps the
+          # pure default lean), so make it available and build without
+          # isolation so setup.py can import mypyc.build.
+          CIBW_BEFORE_BUILD: "pip install mypy setuptools wheel regex"
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # CPython 3.8-3.13 (matches requires-python >= 3.8 in pyproject.toml);
+          # skip PyPy, musllinux, and 32-bit targets.
+          CIBW_BUILD: "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "pp* *-musllinux* *_i686 *-win32"
+          # Fail the build if a wheel silently shipped the pure-Python fallback.
+          CIBW_TEST_COMMAND: "python {project}/tests/smoke_compiled.py"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
+
+  make_sdist:
+    name: sdist (pure-Python fallback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: ./dist/*.tar.gz

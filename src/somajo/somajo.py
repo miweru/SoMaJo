@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
+import concurrent.futures
 import functools
 import itertools
 import multiprocessing
+import sys
 
 from . import (
     alignment,
@@ -12,6 +14,32 @@ from . import (
 from .sentence_splitter import SentenceSplitter
 from .token import Token
 from .tokenizer import Tokenizer
+
+
+# Each worker process builds its own SoMaJo once (via the Pool initializer)
+# instead of receiving a pickled instance per task. This avoids shipping the
+# Tokenizer's compiled regexes across the process boundary on every chunk — and
+# is required once the Tokenizer is a compiled (mypyc) native class, which does
+# not round-trip through pickle. Only the Token objects in the input chunks and
+# the result lists cross the boundary (Token stays pure Python and picklable).
+_worker_somajo = None
+_worker_xml_input = False
+
+
+def _init_worker(config, xml_input):
+    global _worker_somajo, _worker_xml_input
+    _worker_somajo = SoMaJo(**config)
+    _worker_xml_input = xml_input
+
+
+def _worker_tokenize(token_info_item):
+    return _worker_somajo._tokenize(token_info_item, _worker_xml_input)
+
+
+def _gil_enabled():
+    """True on regular CPython, False on a free-threaded build with the GIL off."""
+    check = getattr(sys, "_is_gil_enabled", None)
+    return check() if check is not None else True
 
 
 class SoMaJo:
@@ -35,6 +63,11 @@ class SoMaJo:
     character_offsets : bool, (default=False)
         Compute the character offsets in the input for each token.
         This allows for stand-off tokenization.
+    fast : bool, (default=False)
+        Use the opt-in single-pass tokenizer (~7-8x faster, ~99.7% token
+        F1 on EmpiriST vs ~99.8% for the default). It is NOT byte-identical
+        to the default tokenizer and does not support ``character_offsets``
+        or XML input.
 
     """
 
@@ -42,21 +75,42 @@ class SoMaJo:
     _default_language = "de_CMC"
     paragraph_separators = {"empty_lines", "single_newlines"}
     _default_parsep = "empty_lines"
+    # Below this many input chunks, spawning a multiprocessing.Pool (worker
+    # startup + per-worker regex recompilation) costs more than it saves, so we
+    # fall back to the serial path even when ``parallel > 1``. Tunable.
+    _parallel_min_paragraphs = 1000
 
-    def __init__(self, language, *, split_camel_case=False, split_sentences=True, xml_sentences=None, character_offsets=False):
+    def __init__(self, language, *, split_camel_case=False, split_sentences=True, xml_sentences=None, character_offsets=False, fast=False):
         assert language in self.supported_languages
         self.language = language
         self.split_camel_case = split_camel_case
         self.split_sentences = split_sentences
         self.xml_sentences = xml_sentences
         self.character_offsets = character_offsets
-        self._tokenizer = Tokenizer(split_camel_case=self.split_camel_case, language=self.language)
+        self.fast = fast
+        if fast:
+            # Opt-in single-pass tokenizer: ~7-8x faster, ~99.5-99.9% F1 vs the
+            # exact tokenizer's ~99.6-99.9% on EmpiriST (within ~0.01 pp). It is
+            # NOT byte-identical and does not support character offsets or XML.
+            if character_offsets:
+                raise ValueError("fast=True does not support character_offsets")
+            from .fast_tokenizer import FastTokenizer
+            self._fast_tokenizer = FastTokenizer(language=language, split_camel_case=split_camel_case)
+        else:
+            from ._compiled import warn_if_interpreted
+            warn_if_interpreted()
+            self._tokenizer = Tokenizer(split_camel_case=self.split_camel_case, language=self.language)
         if self.split_sentences:
             self._sentence_splitter = SentenceSplitter(language=self.language)
 
     def _tokenize(self, token_info, xml_input):
         """Tokenize and sentence split a single token_dll."""
         token_list, raw, position = token_info
+        if self.fast:
+            tokens = self._fast_tokenizer.tokenize(raw)
+            if self.split_sentences:
+                tokens = self._sentence_splitter._split_sentences(tokens)
+            return tokens
         token_dll = doubly_linked_list.DLL(token_list)
         tokens = self._tokenizer._tokenize(token_dll)
         if self.character_offsets:
@@ -72,23 +126,56 @@ class SoMaJo:
         parallelization.
 
         """
-        def partok():
-            with multiprocessing.Pool(min(parallel, multiprocessing.cpu_count())) as pool:
-                tokens = pool.imap(
-                    functools.partial(self._tokenize, xml_input=xml_input),
-                    token_info,
-                    250
-                )
-                for par in tokens:
+        func = functools.partial(self._tokenize, xml_input=xml_input)
+        n_workers = min(parallel, multiprocessing.cpu_count())
+
+        def partok(items):
+            config = {
+                "language": self.language,
+                "split_camel_case": self.split_camel_case,
+                "split_sentences": self.split_sentences,
+                "xml_sentences": self.xml_sentences,
+                "character_offsets": self.character_offsets,
+                "fast": self.fast,
+            }
+            with multiprocessing.Pool(
+                    n_workers,
+                    initializer=_init_worker,
+                    initargs=(config, xml_input)) as pool:
+                for par in pool.imap(_worker_tokenize, items, 250):
                     yield par
 
+        def threadtok(items):
+            # On a free-threaded build the GIL no longer serializes pure-Python
+            # work, so threads give real multi-core speedup with a SHARED
+            # Tokenizer — no pickling, no per-worker regex recompile, no process
+            # spawn. _tokenize works on per-call local state; the only shared
+            # mutable is the Tokenizer's lazily-filled group-number cache, whose
+            # writes are idempotent (same pattern -> same value).
+            #
+            # Items are handed out in batches (like the process pool's
+            # chunksize) so the work-queue lock is taken ~once per batch rather
+            # than once per paragraph, which is what lets thread scaling hold up.
+            item_iter = iter(items)
+            batches = iter(lambda: list(itertools.islice(item_iter, 250)), [])
+            with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
+                for batch_result in ex.map(lambda b: [func(i) for i in b], batches):
+                    yield from batch_result
+
         if parallel > 1:
-            tokens = partok()
+            # Peek at the first chunks: if the input is small, the pool's
+            # startup cost dominates, so run serially instead. Output is
+            # identical either way (chunk-level parallelism is deterministic
+            # and order-preserving).
+            head = list(itertools.islice(token_info, self._parallel_min_paragraphs))
+            if len(head) < self._parallel_min_paragraphs:
+                tokens = map(func, head)
+            elif _gil_enabled():
+                tokens = partok(itertools.chain(head, token_info))
+            else:
+                tokens = threadtok(itertools.chain(head, token_info))
         else:
-            tokens = map(
-                functools.partial(self._tokenize, xml_input=xml_input),
-                token_info
-            )
+            tokens = map(func, token_info)
         if self.split_sentences:
             tokens = itertools.chain.from_iterable(tokens)
             tokens = self._sentence_splitter._merge_empty_sentences(tokens)
@@ -105,6 +192,8 @@ class SoMaJo:
         return tokens
 
     def _tokenize_xml(self, xml_data, is_file, eos_tags, strip_tags, parallel, prune_tags):
+        if self.fast:
+            raise ValueError("fast=True does not support XML input; use the default tokenizer.")
         if eos_tags is not None:
             eos_tags = set(eos_tags)
         if prune_tags is not None:

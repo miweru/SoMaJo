@@ -5,6 +5,16 @@
 /doc/build/doctrees/
 /src/SoMaJo.egg-info/
 /venv/
+/.venv/
+/.idea/
+/benchmarks/golden/
+/build/
+/src/build/
+*.so
 __pycache__/
 *~
 *.pyc
+/somajo-native/target/
+/benchmarks/empirist_real_text.json
+/benchmarks/cython_proto/proto.c
+/benchmarks/cython_proto/build/

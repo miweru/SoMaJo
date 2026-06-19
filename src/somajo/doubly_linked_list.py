@@ -25,18 +25,28 @@ class DLL:
         if iterable is not None:
             self.extend(iterable)
 
-    def __iter__(self, start=None):
+    def __iter__(self):
         current = self.first
-        if start is not None:
-            current = start
         while current is not None:
             yield current
             current = current.next
 
-    def __reversed__(self, start=None):
+    def iterate(self, start=None):
+        """Iterate forward, optionally starting from ``start`` instead of the head."""
+        current = self.first if start is None else start
+        while current is not None:
+            yield current
+            current = current.next
+
+    def __reversed__(self):
         current = self.last
-        if start is not None:
-            current = start
+        while current is not None:
+            yield current
+            current = current.prev
+
+    def iterate_reversed(self, start=None):
+        """Iterate backward, optionally starting from ``start`` instead of the tail."""
+        current = self.last if start is None else start
         while current is not None:
             yield current
             current = current.prev
